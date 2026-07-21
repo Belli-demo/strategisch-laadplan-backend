@@ -458,7 +458,7 @@ app.get('/geo/ev-aandeel/:nisCode', async (req, res) => {
     return res.status(400).json({ error: 'Ongeldige NIS-code. Verwacht 5 cijfers, bv. 24062.' });
   }
 
-  const SWING_BASE = 'https://provincies.incijfers.be/ods/odata';
+  const SWING_BASE = 'https://provincies.incijfers.be/viewerservices/odata';
   const PEILJAAR   = 'year_2025';
   const GEOLEVEL   = 'gemeente';
   const VARIABELEN = [
