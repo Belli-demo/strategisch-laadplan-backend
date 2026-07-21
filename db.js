@@ -265,33 +265,46 @@ async function ververBevolkingscijfers() {
   }
 
   let bijgewerkt = 0;
+  const rijksregisterMap = new Map(); // naam (lowercase, getrimd) -> inwoners
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     for (let i = headerIdx + 1; i < rijen.length; i++) {
       const rij = rijen[i];
-      const naam = rij?.[gemeenteKol];
+      const naamRuw = rij?.[gemeenteKol];
       const inwonersRuw = rij?.[inwonersKol];
-      if (!naam || inwonersRuw == null) continue;
+      if (!naamRuw || inwonersRuw == null) continue;
+      const naam = String(naamRuw).trim();
       const inwoners = parseInt(String(inwonersRuw).replace(/\./g, '').replace(/,/g, ''));
       if (!Number.isFinite(inwoners) || inwoners <= 0) continue;
       await client.query(
         `INSERT INTO bevolking_rijksregister (naam, inwoners, bijgewerkt)
          VALUES ($1,$2,NOW())
          ON CONFLICT (naam) DO UPDATE SET inwoners=$2, bijgewerkt=NOW()`,
-        [String(naam).trim(), inwoners]);
+        [naam, inwoners]);
+      rijksregisterMap.set(naam.toLowerCase(), inwoners);
       bijgewerkt++;
     }
+
     // Werk ook meteen alle al onboarde gemeenten bij (naam-matching,
     // hoofdletterongevoelig), zodat een ververs niet alleen de landelijke
     // referentietabel vult maar ook direct de eigen gemeenten actualiseert.
-    const { rowCount: gemeentenBijgewerkt } = await client.query(`
-      UPDATE gemeenten g
-      SET inwoners = b.inwoners
-      FROM bevolking_rijksregister b
-      WHERE LOWER(g.naam) = LOWER(b.naam)
-        AND (g.inwoners IS NULL OR g.inwoners <> b.inwoners)
-    `);
+    // Bewust losse, simpele UPDATE-statements per gemeente i.p.v. één
+    // bulk-SQL-statement (UPDATE...FROM met aliassen, en ook een
+    // correlated-subquery-variant), want beide bleken problematisch, de
+    // eerste gaf op de echte database 0 in plaats van het verwachte
+    // aantal, en dit eenvoudigere patroon is hetzelfde, al meermaals
+    // succesvol geteste patroon als de rest van dit bestand.
+    const { rows: bestaandeGemeenten } = await client.query('SELECT id, naam, inwoners FROM gemeenten');
+    let gemeentenBijgewerkt = 0;
+    for (const g of bestaandeGemeenten) {
+      const nieuw = rijksregisterMap.get(String(g.naam).trim().toLowerCase());
+      if (nieuw == null) continue; // geen match in het Rijksregister-bestand
+      if (g.inwoners === nieuw) continue; // al up-to-date
+      await client.query('UPDATE gemeenten SET inwoners=$1 WHERE id=$2', [nieuw, g.id]);
+      gemeentenBijgewerkt++;
+    }
+
     await client.query('COMMIT');
     return { bijgewerkt, gemeentenBijgewerkt, bron: url };
   } catch (e) {
