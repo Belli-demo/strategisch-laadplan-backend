@@ -32,6 +32,7 @@ function rowToGemeente(row, wijken = []) {
     privePctBerekend: row.prive_pct_berekend != null ? parseFloat(row.prive_pct_berekend) : 0.5,
     evAandeelOverride: row.ev_aandeel_override || undefined,
     oppervlakteKm2: row.oppervlakte_km2 != null ? parseFloat(row.oppervlakte_km2) : null,
+    postcodes: row.postcodes || [],
     center:     [parseFloat(row.center_lat), parseFloat(row.center_lng)],
     zoom:       row.zoom,
     kleur:      row.kleur,
@@ -105,8 +106,8 @@ app.post('/gemeenten', async (req, res) => {
     await client.query('BEGIN');
 
     await client.query(`
-      INSERT INTO gemeenten (id,naam,provincie,land,inwoners,voertuigen,center_lat,center_lng,zoom,kleur,bbox,welvaartsindex,prive_pct_berekend,ev_aandeel_override,oppervlakte_km2)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      INSERT INTO gemeenten (id,naam,provincie,land,inwoners,voertuigen,center_lat,center_lng,zoom,kleur,bbox,welvaartsindex,prive_pct_berekend,ev_aandeel_override,oppervlakte_km2,postcodes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
       [ g.id, g.naam, g.provincie||'', g.land||'België',
         g.inwoners||0, g.voertuigen||0,
         g.center?.[0]||0, g.center?.[1]||0,
@@ -115,7 +116,8 @@ app.post('/gemeenten', async (req, res) => {
         g.welvaartsindex ?? 106.9,
         g.privePctBerekend ?? 0.5,
         g.evAandeelOverride ? JSON.stringify(g.evAandeelOverride) : null,
-        g.oppervlakteKm2 ?? null ]);
+        g.oppervlakteKm2 ?? null,
+        JSON.stringify(g.postcodes ?? []) ]);
 
     if (g.wijken?.length) {
       for (let i=0; i<g.wijken.length; i++) {
@@ -166,9 +168,9 @@ app.put('/gemeenten/:id', async (req, res) => {
         naam=$1, provincie=$2, land=$3, inwoners=$4, voertuigen=$5,
         center_lat=$6, center_lng=$7, zoom=$8, kleur=$9, bbox=$10,
         welvaartsindex=$11, prive_pct_berekend=$12, ev_aandeel_override=$13,
-        oppervlakte_km2=$14,
+        oppervlakte_km2=$14, postcodes=$15,
         bijgewerkt=NOW()
-      WHERE id=$15`,
+      WHERE id=$16`,
       [ g.naam, g.provincie, g.land, g.inwoners, g.voertuigen,
         g.center?.[0], g.center?.[1], g.zoom, g.kleur,
         JSON.stringify(g.bbox),
@@ -176,6 +178,7 @@ app.put('/gemeenten/:id', async (req, res) => {
         g.privePctBerekend ?? 0.5,
         g.evAandeelOverride ? JSON.stringify(g.evAandeelOverride) : null,
         g.oppervlakteKm2 ?? null,
+        JSON.stringify(g.postcodes ?? []),
         req.params.id ]);
 
     // Verwijder bestaande wijken en herplaats
@@ -210,7 +213,7 @@ app.put('/gemeenten/:id', async (req, res) => {
 // ── PATCH /gemeenten/:id — gemeente gedeeltelijk bijwerken ──────────
 app.patch('/gemeenten/:id', async (req, res) => {
   const fields = req.body;
-  const allowed = ['naam','provincie','inwoners','voertuigen','kleur','zoom','welvaartsindex','privePctBerekend','evAandeelOverride','oppervlakteKm2'];
+  const allowed = ['naam','provincie','inwoners','voertuigen','kleur','zoom','welvaartsindex','privePctBerekend','evAandeelOverride','oppervlakteKm2','postcodes'];
   const kolomNaam = { privePctBerekend:'prive_pct_berekend', evAandeelOverride:'ev_aandeel_override', oppervlakteKm2:'oppervlakte_km2' };
   const gefilterd = Object.entries(fields).filter(([k]) => allowed.includes(k));
   const updates = gefilterd.map(([k], i) => `${kolomNaam[k]||k}=$${i+2}`);
@@ -218,7 +221,7 @@ app.patch('/gemeenten/:id', async (req, res) => {
   if (!updates.length) return res.status(400).json({ error:'Geen geldige velden' });
 
   try {
-    const waarden = gefilterd.map(([k,v]) => k==='evAandeelOverride' && v ? JSON.stringify(v) : v);
+    const waarden = gefilterd.map(([k,v]) => (k==='evAandeelOverride' || k==='postcodes') && v ? JSON.stringify(v) : v);
     await pool.query(
       `UPDATE gemeenten SET ${updates.join(',')},bijgewerkt=NOW() WHERE id=$1`,
       [req.params.id, ...waarden]);
@@ -395,6 +398,52 @@ app.get('/geo/laadpalen/:id', async (req, res) => {
     }));
 
     res.json({ elements, bron: 'mow' });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /geo/fluvius-prive/:id — geregistreerde private laadpunten (Fluvius
+// Open Data) per postcode van deze gemeente. Geeft de ruwe telling terug;
+// het omrekenen naar een privé%-voorstel gebeurt in de frontend, die al de
+// EV-aandeel-logica heeft (welvaartsindex-correctie / override) om door de
+// juiste, actuele EV-populatie te delen.
+app.get('/geo/fluvius-prive/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query('SELECT postcodes FROM gemeenten WHERE id=$1', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Gemeente niet gevonden' });
+    const postcodes = rows[0].postcodes || [];
+    if (!postcodes.length) {
+      return res.status(400).json({ error: 'Geen postcodes ingesteld voor deze gemeente. Vul die eerst in via Bewerken.' });
+    }
+
+    const perPostcode = {};
+    let totaal = 0;
+    let mislukt = [];
+    for (const postcode of postcodes) {
+      try {
+        const url = `https://opendata.fluvius.be/api/v2/catalog/datasets/1_21-aangemelde-oplaadpunten-voor-ev/records?where=postcode%3D%22${encodeURIComponent(postcode)}%22&limit=1`;
+        const resp = await fetch(url);
+        if (!resp.ok) { mislukt.push(postcode); continue; }
+        const data = await resp.json();
+        const aantal = data.total_count ?? 0;
+        perPostcode[postcode] = aantal;
+        totaal += aantal;
+      } catch {
+        mislukt.push(postcode);
+      }
+    }
+
+    if (Object.keys(perPostcode).length === 0) {
+      return res.status(502).json({ error: 'Fluvius Open Data kon voor geen enkele postcode bereikt worden.', mislukt });
+    }
+
+    res.json({
+      postcodes, perPostcode, totaalPrivePunten: totaal, mislukt,
+      bron: 'Fluvius Open Data, dataset 1_21-aangemelde-oplaadpunten-voor-ev',
+      opgehaald: new Date().toISOString(),
+    });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }

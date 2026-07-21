@@ -75,6 +75,7 @@ async function initSchema() {
       ALTER TABLE wijken ADD COLUMN IF NOT EXISTS oppervlakte_km2 DOUBLE PRECISION;
       ALTER TABLE wijken ADD COLUMN IF NOT EXISTS oppervlakte_is_proxy BOOLEAN DEFAULT true;
       ALTER TABLE gemeenten ADD COLUMN IF NOT EXISTS oppervlakte_km2 DOUBLE PRECISION;
+      ALTER TABLE gemeenten ADD COLUMN IF NOT EXISTS postcodes JSONB DEFAULT '[]'::jsonb;
     `);
 
     // Backfill voor de drie startgemeenten: als deze al bestonden vóór deze
@@ -84,10 +85,11 @@ async function initSchema() {
     // Deze UPDATE zet de juiste waarden altijd terug, ook op een bestaande rij.
     for (const g of STARTDATA) {
       await client.query(
-        `UPDATE gemeenten SET welvaartsindex=$1, prive_pct_berekend=$2, ev_aandeel_override=$3, oppervlakte_km2=$4
-         WHERE id=$5`,
+        `UPDATE gemeenten SET welvaartsindex=$1, prive_pct_berekend=$2, ev_aandeel_override=$3, oppervlakte_km2=$4, postcodes=$5
+         WHERE id=$6`,
         [g.welvaartsindex ?? 106.9, g.privePctBerekend ?? 0.5,
-         g.evAandeelOverride ? JSON.stringify(g.evAandeelOverride) : null, g.oppervlakte ?? null, g.id]);
+         g.evAandeelOverride ? JSON.stringify(g.evAandeelOverride) : null, g.oppervlakte ?? null,
+         JSON.stringify(g.postcodes ?? []), g.id]);
       for (const w of g.wijken) {
         await client.query(
           `UPDATE wijken SET wijktype_v2=$1, ov_aandeel=$2, oppervlakte_km2=$3, oppervlakte_is_proxy=false WHERE id=$4 AND gemeente_id=$5`,
@@ -107,6 +109,7 @@ const STARTDATA = [
     id:'leuven', naam:'Leuven', provincie:'Vlaams-Brabant', land:'België',
     inwoners:104906, voertuigen:48200, oppervlakte:56.63,
     welvaartsindex:115, privePctBerekend:0.636, evAandeelOverride:{2030:0.376, 2035:0.595},
+    postcodes:['3000','3001','3010','3012','3018'], // extern geverifieerd (bpost)
     lat:50.8798, lng:4.7005, zoom:13, kleur:'#2B5F6E',
     bbox:[50.82,4.65,50.94,4.77],
     wijken:[
@@ -123,7 +126,8 @@ const STARTDATA = [
   {
     id:'olen', naam:'Olen', provincie:'Antwerpen', land:'België',
     inwoners:14000, voertuigen:8200, oppervlakte:23.10,
-    welvaartsindex:92, privePctBerekend:0.70,
+    welvaartsindex:107, privePctBerekend:0.70,
+    postcodes:['2250'], // extern geverifieerd (bpost/Wikipedia)
     lat:51.1400, lng:4.8600, zoom:13, kleur:'#3A6B4A',
     bbox:[51.10,4.82,51.18,4.91],
     wijken:[
@@ -137,6 +141,7 @@ const STARTDATA = [
     id:'gent', naam:'Gent', provincie:'Oost-Vlaanderen', land:'België',
     inwoners:268000, voertuigen:112000, oppervlakte:156.18,
     welvaartsindex:98, privePctBerekend:0.60,
+    postcodes:['9000','9030','9031','9032','9040','9050','9051','9052'], // beste inschatting, mogelijk niet volledig
     lat:51.0543, lng:3.7174, zoom:12, kleur:'#9EC5CB',
     bbox:[50.99,3.64,51.12,3.80],
     wijken:[
@@ -160,14 +165,14 @@ async function seedStartdata() {
     await client.query('BEGIN');
     for (const g of STARTDATA) {
       await client.query(`
-        INSERT INTO gemeenten (id,naam,provincie,land,inwoners,voertuigen,center_lat,center_lng,zoom,kleur,bbox,welvaartsindex,prive_pct_berekend,ev_aandeel_override,oppervlakte_km2)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        INSERT INTO gemeenten (id,naam,provincie,land,inwoners,voertuigen,center_lat,center_lng,zoom,kleur,bbox,welvaartsindex,prive_pct_berekend,ev_aandeel_override,oppervlakte_km2,postcodes)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         ON CONFLICT (id) DO NOTHING`,
         [g.id, g.naam, g.provincie, g.land, g.inwoners, g.voertuigen,
          g.lat, g.lng, g.zoom, g.kleur, JSON.stringify(g.bbox),
          g.welvaartsindex ?? 106.9, g.privePctBerekend ?? 0.5,
          g.evAandeelOverride ? JSON.stringify(g.evAandeelOverride) : null,
-         g.oppervlakte ?? null]);
+         g.oppervlakte ?? null, JSON.stringify(g.postcodes ?? [])]);
 
       for (let i = 0; i < g.wijken.length; i++) {
         const w = g.wijken[i];
