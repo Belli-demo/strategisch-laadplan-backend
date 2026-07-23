@@ -1,0 +1,19 @@
+{
+  "name": "cluster-analyse",
+  "version": "1.0.0",
+  "description": "Cluster-analyse voor Stap 3 van prognosemodel: gemeenten indelen in profielen op basis van Fluvius/MOW/Statbel data.",
+  "type": "commonjs",
+  "scripts": {
+    "1-historie": "node 1-haal-historie.js",
+    "2-features": "node 2-bereken-features.js",
+    "3-cluster": "node 3-cluster.js",
+    "4-curves": "node 4-fit-curves.js",
+    "5-lookup": "node 5-genereer-lookup.js",
+    "all": "npm run 1-historie && npm run 2-features && npm run 3-cluster && npm run 4-curves && npm run 5-lookup"
+  },
+  "dependencies": {
+    "ml-hclust": "^3.1.0",
+    "simple-statistics": "^7.8.3",
+    "node-fetch": "^2.7.0"
+  }
+}
