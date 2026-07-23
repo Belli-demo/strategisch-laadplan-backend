@@ -663,6 +663,102 @@ start();
 // ══════════════════════════════════════════════════════════════════════
 const { initGeoSchema, getNisCode, onboardGemeenteGeo, getSectorenFromDb } = require('./geo');
 
+// GET /cluster/data — verzamelt in één response alle data voor cluster-analyse:
+// per Belgische gemeente in de database (of alleen ?ids=a,b,c): fluvius-historie
+// (2019-2025), MOW gewogen tellingen per publiek/semi × AC/DC/HPC, inwoners,
+// oppervlakte, welvaartsindex. Bedoeld als "bulk fetch" zodat cluster-analyse
+// buiten de backend één keer alle input tegelijk krijgt.
+app.get('/cluster/data', async (req, res) => {
+  try {
+    const idsParam = req.query.ids;
+    let query = 'SELECT id, naam, inwoners, oppervlakte_km2, welvaartsindex, postcodes FROM gemeenten';
+    let params = [];
+    if (idsParam) {
+      const ids = idsParam.split(',').map(s => s.trim()).filter(Boolean);
+      query += ' WHERE id = ANY($1::text[])';
+      params = [ids];
+    }
+    const { rows } = await pool.query(query, params);
+
+    const perGemeente = {};
+
+    // Helper: Fluvius historie ophalen (hergebruik van bestaande code)
+    async function fluviusHistorie(postcodes) {
+      const cumulatief = {};
+      for (let j = 2019; j <= 2025; j++) cumulatief[j] = 0;
+      let totaal = 0;
+      const mislukt = [];
+      for (const postcode of postcodes) {
+        try {
+          let offset = 0;
+          let doorgaan = true;
+          let maxPages = 20;
+          while (doorgaan && maxPages > 0) {
+            const url = `https://opendata.fluvius.be/api/v2/catalog/datasets/1_21-aangemelde-oplaadpunten-voor-ev/records?where=postcode%3D%22${encodeURIComponent(postcode)}%22&limit=100&offset=${offset}`;
+            const resp = await fetch(url);
+            if (!resp.ok) { mislukt.push(postcode); break; }
+            const data = await resp.json();
+            const records = data.records || [];
+            for (const rec of records) {
+              const jaarStr = rec.record?.fields?.jaartal_indienstname ?? rec.fields?.jaartal_indienstname ?? rec.jaartal_indienstname;
+              const jaar = jaarStr ? parseInt(jaarStr, 10) : null;
+              if (jaar == null || isNaN(jaar)) continue;
+              for (let j = Math.max(jaar, 2019); j <= 2025; j++) cumulatief[j] += 1;
+            }
+            totaal += records.length;
+            if (records.length < 100) doorgaan = false;
+            offset += 100;
+            maxPages--;
+          }
+        } catch(e) { mislukt.push(postcode); }
+      }
+      return { cumulatief, totaal, mislukt };
+    }
+
+    // MOW: telling per publiek/semi × AC/DC/HPC via lokale index
+    function mowTellingen(gemeenteNaam) {
+      const punten = mowLaadpuntenIndex.get(normaliseerNaam(gemeenteNaam)) || [];
+      const tel = { Qp_AC:0, Qp_DC:0, Qp_HPC:0, Qs_AC:0, Qs_DC:0, Qs_HPC:0 };
+      for (const p of punten) {
+        const type = p.snelheid === 'ultrasnel' ? 'HPC' : p.snelheid === 'snel' ? 'DC' : 'AC';
+        const isSemi = p.toegankelijkheid === 'semi-publiek';
+        tel[(isSemi ? 'Qs_' : 'Qp_') + type] += 1;
+      }
+      return tel;
+    }
+
+    // Parallel Fluvius (batch van 5 tegelijk om rate limit te beheersen)
+    const gemeenten = rows.filter(g => Array.isArray(g.postcodes) && g.postcodes.length);
+    const batchGrootte = 5;
+    for (let i = 0; i < gemeenten.length; i += batchGrootte) {
+      const batch = gemeenten.slice(i, i + batchGrootte);
+      await Promise.all(batch.map(async (g) => {
+        const fluv = await fluviusHistorie(g.postcodes);
+        const mow = mowTellingen(g.naam);
+        perGemeente[g.id] = {
+          naam: g.naam,
+          inwoners: g.inwoners,
+          oppervlakte_km2: g.oppervlakte_km2 != null ? parseFloat(g.oppervlakte_km2) : null,
+          welvaartsindex: g.welvaartsindex != null ? parseFloat(g.welvaartsindex) : null,
+          fluvius_cumulatief: fluv.cumulatief,
+          fluvius_totaal: fluv.totaal,
+          fluvius_mislukt: fluv.mislukt,
+          mow: mow,
+        };
+      }));
+    }
+
+    res.json({
+      gemeenten: perGemeente,
+      aantal: Object.keys(perGemeente).length,
+      opgehaald: new Date().toISOString(),
+      bron: 'Fluvius Open Data + MOW-dataset 17/07/2026 + interne database',
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /geo/nis-lookup?naam=Mechelen&land=België
 app.get('/geo/nis-lookup', async (req, res) => {
   const { naam, land = 'België' } = req.query;
