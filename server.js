@@ -663,6 +663,52 @@ start();
 // ══════════════════════════════════════════════════════════════════════
 const { initGeoSchema, getNisCode, onboardGemeenteGeo, getSectorenFromDb } = require('./geo');
 
+// GET /gemeenten/vul-postcodes-aan — vult automatisch postcodes in voor
+// Belgische gemeenten die er nog geen hebben. Handig na het onboarden van
+// meerdere gemeenten omdat de wizard postcodes niet automatisch ophaalt.
+// Overschrijft NOOIT bestaande postcodes; enkel gemeenten met een lege lijst
+// worden aangevuld.
+const POSTCODES_LOOKUP = {
+  'antwerpen':    ['2000','2018','2020','2030','2040','2050','2060','2100','2140','2170','2180','2600','2610','2660'],
+  'hasselt':      ['3500','3501','3510','3511','3512'],
+  'vilvoorde':    ['1800'],
+  'brasschaat':   ['2930'],
+  'bonheiden':    ['2820'],
+  'knokke-heist': ['8300','8301'],
+  'oostende':     ['8400'],
+  'brugge':       ['8000','8200','8310','8380'],
+  'mechelen':     ['2800','2801','2811','2812'],
+  'genk':         ['3600'],
+  'diest':        ['3290','3293'],
+  'beveren':      ['9120'],
+};
+app.get('/gemeenten/vul-postcodes-aan', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id, naam, postcodes FROM gemeenten');
+    const bijgewerkt = [];
+    const overgeslagen = [];
+    const geenLookup = [];
+    for (const g of rows) {
+      const heeftPostcodes = Array.isArray(g.postcodes) && g.postcodes.length > 0;
+      if (heeftPostcodes) { overgeslagen.push({ id: g.id, reden: 'heeft al postcodes' }); continue; }
+      const sleutel = normaliseerNaam(g.naam);
+      const postcodes = POSTCODES_LOOKUP[sleutel];
+      if (!postcodes) { geenLookup.push({ id: g.id, naam: g.naam }); continue; }
+      await pool.query('UPDATE gemeenten SET postcodes=$1 WHERE id=$2', [postcodes, g.id]);
+      bijgewerkt.push({ id: g.id, naam: g.naam, postcodes });
+    }
+    res.json({
+      bijgewerkt: bijgewerkt.length,
+      details: bijgewerkt,
+      overgeslagen: overgeslagen.length,
+      geenLookup: geenLookup,
+      opgehaald: new Date().toISOString(),
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /cluster/data — verzamelt in één response alle data voor cluster-analyse:
 // per Belgische gemeente in de database (of alleen ?ids=a,b,c): fluvius-historie
 // (2019-2025), MOW gewogen tellingen per publiek/semi × AC/DC/HPC, inwoners,
