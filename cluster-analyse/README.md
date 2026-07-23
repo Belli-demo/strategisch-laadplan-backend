@@ -1,41 +1,30 @@
 # Cluster-analyse module
 
-Vervangt de placeholder-daling (2%/jaar) in Stap 3 van het prognosemodel door een empirisch afgeleide dalingscurve per gemeente-cluster.
+Vervangt de placeholder-daling (2%/jaar) in Stap 3 door een empirisch afgeleide dalingscurve per cluster.
 
-## Hoe werkt het
+## Werking
 
-Gemeenten worden ingedeeld in clusters op basis van hun profiel (privePct-huidig, historische groei, bevolkingsdichtheid, welvaartsindex). Per cluster wordt de historische trend van de privé-fractie gefit (lineaire regressie). Elke gemeente krijgt de curve van zijn cluster als input voor de prognose.
-
-## Structuur
-
-```
-cluster-analyse/
-├── config.js              parameters (gemeenten, jaren, features)
-├── 1-haal-historie.js     Fluvius jaar_indienstname → tijdreeks per gemeente
-├── 2-bereken-features.js  feature-vector per gemeente
-├── 3-cluster.js           Ward-linkage hiërarchische clustering
-├── 4-fit-curves.js        per cluster: lineaire trend fitten
-├── 5-genereer-lookup.js   eindresultaat cluster-lookup.json
-├── output/                tussenresultaten en eindresultaat
-└── package.json
-```
+1. Backend endpoint `/geo/fluvius-historie/:id` levert per gemeente de cumulatieve Fluvius-stand per jaar (2019-2025).
+2. Feature-vector per gemeente wordt berekend (privePct nu, groei, dichtheid, welvaartsindex).
+3. Hiërarchische clustering (Ward) groepeert gemeenten met vergelijkbaar profiel.
+4. Per cluster: lineaire regressie op privé-fractie tijdreeks.
+5. Output: `cluster-lookup.json` met per gemeente cluster + daling per jaar + R².
 
 ## Uitvoeren
+
+Vereist: bij backend een endpoint `/geo/fluvius-historie/:id` (zie server.js).
 
 ```bash
 cd cluster-analyse
 npm install
-npm run all           # draait 1 → 5 achter elkaar
+BACKEND_URL=https://jouw-backend.up.railway.app npm run all
 ```
 
-Losse stappen: `npm run 1-historie`, `npm run 2-features`, etc.
-
-Runtime: ~5-10 minuten voor 20 gemeenten (Fluvius rate-limit 1 call/seconde).
+Runtime: ~1-2 minuten (rate-limiting zit in de backend).
 
 ## Output
 
-`output/cluster-lookup.json` heeft per gemeente:
-
+`output/cluster-lookup.json` per gemeente:
 ```json
 {
   "leuven": {
@@ -47,29 +36,4 @@ Runtime: ~5-10 minuten voor 20 gemeenten (Fluvius rate-limit 1 call/seconde).
 }
 ```
 
-Dit wordt gelezen door het backend endpoint `/cluster/lookup/:gemeenteId` en door de frontend gebruikt in plaats van de PRIVE_DALING_PER_JAAR placeholder in gemeenteData.js V5.
-
-## Uitbreiden
-
-- **Meer gemeenten**: voeg toe aan `config.GEMEENTEN`, herhaal
-- **Meer features**: voeg toe aan `config.FEATURES` en `2-bereken-features.js`
-- **Andere clustering-methode**: pas `config.CLUSTER_METHODE` aan (agnes options)
-- **MOW-historie**: nu ongebruikt (dataset heeft geen datum-veld); zodra beschikbaar toevoegen in stap 1
-- **Backtest**: hergebruik `historie-per-gemeente.json`, run model met 2020-startjaar, vergelijk met 2025-werkelijkheid
-
-## Integratie in backend
-
-Nieuwe endpoint in `server.js`:
-
-```js
-const clusterLookup = require('./cluster-analyse/output/cluster-lookup.json');
-app.get('/cluster/lookup/:id', (req, res) => {
-  const entry = clusterLookup.lookup[req.params.id];
-  if (!entry) return res.status(404).json({ error: 'geen cluster' });
-  res.json({ ...entry, meta: clusterLookup.meta });
-});
-```
-
-## Integratie in frontend
-
-In `gemeenteData.js` V5, laat `berekenPubliekSemiSplitV5` een optionele `priveDaling` accepteren (dat doet hij al). In `AppWithOnboarding.js`: haal `/cluster/lookup/:id` op bij gemeente-load, geef `entry.privePctDalingPerJaar` mee als `opts.priveDaling`.
+Wordt door de app gebruikt in plaats van de PRIVE_DALING_PER_JAAR placeholder in gemeenteData.js V5.
