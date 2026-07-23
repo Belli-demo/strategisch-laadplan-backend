@@ -663,11 +663,9 @@ start();
 // ══════════════════════════════════════════════════════════════════════
 const { initGeoSchema, getNisCode, onboardGemeenteGeo, getSectorenFromDb } = require('./geo');
 
-// GET /gemeenten/vul-postcodes-aan — vult automatisch postcodes in voor
-// Belgische gemeenten die er nog geen hebben. Handig na het onboarden van
-// meerdere gemeenten omdat de wizard postcodes niet automatisch ophaalt.
-// Overschrijft NOOIT bestaande postcodes; enkel gemeenten met een lege lijst
-// worden aangevuld.
+// GET /admin/vul-postcodes-aan — vult automatisch postcodes in voor
+// Belgische gemeenten die er nog geen hebben. Niet onder /gemeenten/ gemount
+// omdat de :id-route daar de path zou vangen.
 const POSTCODES_LOOKUP = {
   'antwerpen':    ['2000','2018','2020','2030','2040','2050','2060','2100','2140','2170','2180','2600','2610','2660'],
   'hasselt':      ['3500','3501','3510','3511','3512'],
@@ -682,7 +680,7 @@ const POSTCODES_LOOKUP = {
   'diest':        ['3290','3293'],
   'beveren':      ['9120'],
 };
-app.get('/gemeenten/vul-postcodes-aan', async (req, res) => {
+app.get('/admin/vul-postcodes-aan', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT id, naam, postcodes FROM gemeenten');
     const bijgewerkt = [];
