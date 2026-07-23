@@ -4,6 +4,8 @@ const express      = require('express');
 const cors         = require('cors');
 const helmet       = require('helmet');
 const rateLimit    = require('express-rate-limit');
+const fs           = require('fs');
+const path         = require('path');
 const { pool, initSchema, seedStartdata, ververBevolkingscijfers } = require('./db');
 
 const app  = express();
@@ -814,6 +816,116 @@ app.get('/geo/nis-lookup', async (req, res) => {
     res.status(404).json({ error: e.message });
   }
 });
+
+// ══════════════════════════════════════════════════════════════════════
+// POSTCODES PER NIS (Statbel/Bpost conversietabel, peildatum 01-01-2025)
+// ══════════════════════════════════════════════════════════════════════
+// In-memory Map: NIS-code (string) → array van postcodes (strings).
+// Wordt bij server-start eerst geladen uit lokaal bestand; ontbreekt dat
+// (of is de Map leeg), dan wordt de dataset asynchroon gedownload vanuit
+// de Statbel-conversietabel op opendata.brussels.be. Endpoints blijven
+// bereikbaar tijdens de download; geven 404 zolang de Map leeg is.
+const POSTCODES_PATH = path.join(__dirname, 'geo-data', 'postcodes-per-nis.json');
+const POSTCODES_API_URL = 'https://opendata.brussels.be/api/explore/v2.1/catalog/datasets/codes-postaux-et-codes-ins-communes-belges-20250101/records';
+let postcodesPerNis = new Map();
+
+async function downloadPostcodesPerNis() {
+  const alles = {};
+  let offset = 0;
+  let doorgaan = true;
+  let maxPages = 20; // 20 × 100 = 2000 records; dataset is ~1200
+  let totaalRecords = 0;
+  while (doorgaan && maxPages > 0) {
+    const url = `${POSTCODES_API_URL}?limit=100&offset=${offset}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} bij offset=${offset}`);
+    const data = await resp.json();
+    const results = data.results || [];
+    totaalRecords += results.length;
+    for (const rec of results) {
+      const nis = rec.refnis_code;
+      const postcode = rec.postal_code;
+      if (!nis || !postcode) continue;
+      if (!alles[nis]) alles[nis] = [];
+      if (!alles[nis].includes(postcode)) alles[nis].push(postcode);
+    }
+    if (results.length < 100) doorgaan = false;
+    offset += 100;
+    maxPages--;
+  }
+  return { alles, totaalRecords };
+}
+
+async function initPostcodesPerNis() {
+  // Probeer eerst lokaal bestand (kan gecommit zijn in de repo)
+  try {
+    const inhoud = fs.readFileSync(POSTCODES_PATH, 'utf8');
+    const data = JSON.parse(inhoud);
+    postcodesPerNis = new Map(Object.entries(data));
+    console.log(`  Postcodes per NIS geladen uit bestand: ${postcodesPerNis.size} gemeenten`);
+    return;
+  } catch(_) {
+    console.log(`  Postcodes per NIS-bestand ontbreekt; downloaden vanuit Statbel/Bpost...`);
+  }
+  // Fallback: async download; server blijft in tussentijd draaien
+  try {
+    const { alles, totaalRecords } = await downloadPostcodesPerNis();
+    postcodesPerNis = new Map(Object.entries(alles));
+    console.log(`  Postcodes per NIS gedownload: ${postcodesPerNis.size} gemeenten (${totaalRecords} records)`);
+    // Best-effort opslaan (Railway heeft ephemeral fs; falen is OK).
+    try {
+      const dir = path.dirname(POSTCODES_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(POSTCODES_PATH, JSON.stringify(alles, null, 2));
+      console.log(`    ook opgeslagen: ${POSTCODES_PATH}`);
+    } catch(_) { /* stil */ }
+  } catch(e) {
+    console.warn(`  Download postcodes-per-NIS mislukt: ${e.message}. Endpoint /geo/postcodes/:nis geeft 404 tot handmatige refresh via /admin/download-postcodes.`);
+  }
+}
+// Async gestart bij module load; server.listen wacht hier niet op
+initPostcodesPerNis();
+
+// GET /geo/postcodes/:nis — postcodes voor één NIS-code (bijv. 23088 → [1800])
+app.get('/geo/postcodes/:nis', (req, res) => {
+  const { nis } = req.params;
+  const postcodes = postcodesPerNis.get(nis);
+  if (!postcodes) {
+    return res.status(404).json({
+      error: postcodesPerNis.size === 0
+        ? 'Postcode-dataset nog niet geladen. Wacht enkele seconden of roep /admin/download-postcodes aan.'
+        : `Geen postcodes gevonden voor NIS ${nis}.`,
+      dataset_geladen: postcodesPerNis.size > 0,
+      dataset_aantal_gemeenten: postcodesPerNis.size,
+    });
+  }
+  res.json({ nis, postcodes, aantal: postcodes.length, bron: 'Statbel/Bpost 01-01-2025' });
+});
+
+// GET /admin/download-postcodes — handmatige refresh van de postcodes-dataset
+app.get('/admin/download-postcodes', async (req, res) => {
+  try {
+    const { alles, totaalRecords } = await downloadPostcodesPerNis();
+    postcodesPerNis = new Map(Object.entries(alles));
+    // Best-effort opslaan
+    try {
+      const dir = path.dirname(POSTCODES_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(POSTCODES_PATH, JSON.stringify(alles, null, 2));
+    } catch(_) { /* stil */ }
+    res.json({
+      succesvol: true,
+      aantalGemeenten: postcodesPerNis.size,
+      totaalRecords,
+      opgeslagen: POSTCODES_PATH,
+      bron: 'Statbel/Bpost via opendata.brussels.be, peildatum 01-01-2025',
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════
 
 // GET /geo/gemeenten-lijst?land=België  — volledige lijst Vlaamse gemeenten
 // voor de zoekbalk in het onboarding-paneel. Wordt bij pagina-load opgehaald,
