@@ -100,23 +100,21 @@ app.post('/gemeenten', async (req, res) => {
   // Sanitize id
   g.id = g.id.toLowerCase().replace(/[^a-z0-9_]/g,'_').slice(0,50);
 
-  // Auto-fill postcodes als frontend ze niet meegaf. Zoek NIS-code op via
-  // Nominatim/nis-lookup.js op basis van de gemeentenaam en haal de postcodes
-  // uit de al-geladen postcodes-per-NIS Map. Faalt de lookup, dan blijft
-  // postcodes een lege array en kan de gebruiker ze later handmatig invullen.
+  // Auto-fill postcodes als frontend ze niet meegaf. Directe lookup via
+  // NIS_CODES (nis-lookup.js) → postcodesPerNis Map. Synchroon, geen network.
   if (!Array.isArray(g.postcodes) || g.postcodes.length === 0) {
-    try {
-      const info = await getNisCode(g.naam, g.land || 'België');
-      const nis = info?.nis || info?.nisCode || info?.code;
-      if (nis) {
-        const pcs = postcodesPerNis.get(String(nis));
-        if (Array.isArray(pcs) && pcs.length) {
-          g.postcodes = pcs;
-          console.log(`  Postcodes auto-fill voor ${g.naam} (NIS ${nis}): ${pcs.join(', ')}`);
-        }
+    const naamKey = String(g.naam).trim().toLowerCase();
+    const nis = NIS_CODES[naamKey];
+    if (nis) {
+      const pcs = postcodesPerNis.get(String(nis));
+      if (Array.isArray(pcs) && pcs.length) {
+        g.postcodes = pcs;
+        console.log(`  Postcodes auto-fill voor ${g.naam} (NIS ${nis}): ${pcs.join(', ')}`);
+      } else {
+        console.warn(`  Postcodes auto-fill: NIS ${nis} niet gevonden in postcodes-per-NIS map`);
       }
-    } catch(e) {
-      console.warn(`  Postcodes auto-fill voor ${g.naam} mislukt: ${e.message}`);
+    } else {
+      console.warn(`  Postcodes auto-fill: gemeente "${naamKey}" niet in nis-lookup.js`);
     }
   }
 
