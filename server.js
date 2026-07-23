@@ -447,8 +447,10 @@ app.get('/geo/fluvius-prive/:id', async (req, res) => {
 });
 
 // GET /geo/fluvius-historie/:id?vanaf=2019&tot=2025 — cumulatieve Fluvius
-// privé-laadpunten per jaar, voor cluster-analyse. Gebruikt jaar_indienstname
-// veld in de dataset.
+// privé-laadpunten per jaar op basis van 'jaartal_indienstname'.
+// Bewust GEEN select-parameter (die is niet gegarandeerd in Fluvius' /api/v2/
+// alias); we vragen alle velden en lezen alleen jaartal_indienstname uit.
+// Response format van Fluvius volgt Opendatasoft: {records:[{record:{fields:{...}}}]}
 app.get('/geo/fluvius-historie/:id', async (req, res) => {
   const { id } = req.params;
   const vanaf = parseInt(req.query.vanaf) || 2019;
@@ -461,38 +463,72 @@ app.get('/geo/fluvius-historie/:id', async (req, res) => {
       return res.status(400).json({ error: 'Geen postcodes ingesteld.' });
     }
 
-    // Cumulatieve stand per jaar: som van records waar jaar_indienstname <= jaar
+    // Cumulatieve stand per jaar: som van records waar jaartal_indienstname <= jaar
     const cumulatief = {};
     for (let j = vanaf; j <= tot; j++) cumulatief[j] = 0;
     let totaal = 0;
     let mislukt = [];
+    // Debug info per postcode, zichtbaar in Railway logs én terug in de response
+    // zodat we bij problemen precies weten wat Fluvius teruggaf.
+    const debug = [];
 
     for (const postcode of postcodes) {
+      const info = { postcode, http_status: null, pages: 0, records_this_postcode: 0, sample_field: null, sample_year: null, error: null };
       try {
-        // Zelfde v2 API-versie als het werkende /geo/fluvius-prive endpoint.
-        // Records zijn genest onder .records[].record.fields
-        const url = `https://opendata.fluvius.be/api/v2/catalog/datasets/1_21-aangemelde-oplaadpunten-voor-ev/records?where=postcode%3D%22${encodeURIComponent(postcode)}%22&limit=100&select=jaar_indienstname`;
-        const resp = await fetch(url);
-        if (!resp.ok) { mislukt.push(postcode); continue; }
-        const data = await resp.json();
-        const records = data.records || [];
-        totaal += records.length;
-        for (const rec of records) {
-          const jaar = rec.record?.fields?.jaar_indienstname ?? rec.fields?.jaar_indienstname ?? rec.jaar_indienstname;
-          if (jaar == null) continue;
-          for (let j = Math.max(jaar, vanaf); j <= tot; j++) {
-            cumulatief[j] += 1;
+        // Pagineer door alle records per postcode (v2 API cap is 100/pagina).
+        let offset = 0;
+        let doorgaan = true;
+        let maxPages = 20; // veiligheid tegen oneindige lus
+        while (doorgaan && maxPages > 0) {
+          const url = `https://opendata.fluvius.be/api/v2/catalog/datasets/1_21-aangemelde-oplaadpunten-voor-ev/records?where=postcode%3D%22${encodeURIComponent(postcode)}%22&limit=100&offset=${offset}`;
+          const resp = await fetch(url);
+          info.http_status = resp.status;
+          if (!resp.ok) {
+            info.error = `HTTP ${resp.status}`;
+            mislukt.push(postcode);
+            break;
           }
+          const data = await resp.json();
+          // Fluvius /api/v2/ response format is Opendatasoft standaard: data.records array
+          const records = data.records || [];
+          if (info.pages === 0 && records.length > 0) {
+            // Sla één sample op voor debugging
+            const sample = records[0];
+            info.sample_field = sample.record?.fields ?? sample.fields ?? sample;
+            info.sample_year = sample.record?.fields?.jaartal_indienstname
+              ?? sample.fields?.jaartal_indienstname
+              ?? sample.jaartal_indienstname
+              ?? null;
+          }
+          for (const rec of records) {
+            const jaarStr = rec.record?.fields?.jaartal_indienstname
+              ?? rec.fields?.jaartal_indienstname
+              ?? rec.jaartal_indienstname;
+            const jaar = jaarStr ? parseInt(jaarStr, 10) : null;
+            if (jaar == null || isNaN(jaar)) continue;
+            for (let j = Math.max(jaar, vanaf); j <= tot; j++) {
+              cumulatief[j] += 1;
+            }
+          }
+          info.records_this_postcode += records.length;
+          info.pages++;
+          if (records.length < 100) doorgaan = false;
+          offset += 100;
+          maxPages--;
         }
-      } catch {
+        totaal += info.records_this_postcode;
+      } catch (e) {
+        info.error = e.message;
         mislukt.push(postcode);
       }
+      debug.push(info);
+      console.log(`  Fluvius-historie ${id} pc=${postcode}: ${info.pages} pagina's, ${info.records_this_postcode} records${info.error ? ', FOUT: '+info.error : ''}`);
     }
 
     res.json({
-      postcodes, cumulatief, totaalRecords: totaal, mislukt,
+      postcodes, cumulatief, totaalRecords: totaal, mislukt, debug,
       periode: { vanaf, tot },
-      bron: 'Fluvius Open Data, dataset 1_21-aangemelde-oplaadpunten-voor-ev, veld jaar_indienstname',
+      bron: 'Fluvius Open Data, dataset 1_21-aangemelde-oplaadpunten-voor-ev, veld jaartal_indienstname',
       opgehaald: new Date().toISOString(),
     });
   } catch(e) {
